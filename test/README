@@ -1,0 +1,79 @@
+BH i.Booster bridge - Phase 1
+
+SETUP
+Copy src\wifi_config.example.h to src\wifi_config.h, then edit WIFI_SSID
+and WIFI_PASS in src\wifi_config.h before building. This local file is
+ignored by Git; do not put real credentials in the example file.
+IP: 192.168.218.61/24, gateway/DNS: 192.168.218.1.
+Reserve that address outside the DHCP pool to avoid conflicts.
+Build: pio run
+Upload (only with the intended board connected): pio run -t upload
+The custom partitions.csv provides two 1.875 MiB OTA application slots;
+upload also writes the partition table so the firmware fits the device.
+USB console: pio device monitor -b 115200
+Open http://192.168.218.61 or http://cinta.local after Wi-Fi connects.
+No boot-time BLE connection or automatic reconnection is attempted.
+NimBLE controller initialization is deferred until Wi-Fi has associated,
+so simultaneous radio startup cannot prevent the web server from booting.
+
+WEB/API
+POST /api/ble/scan: 202; scan runs for 5 seconds in a separate BLE task.
+GET /api/status: scanGeneration, devices (name/address/type/rssi/target),
+state, errors, GATT UUIDs, requested targets and telemetry.
+POST /api/ble/connect: {"address":"AA:BB:CC:DD:EE:FF","type":0}
+Use the address type from the scan (0 public, 1 random).
+An empty object selects PAFERS_C7BE99 from the last scan.
+POST /api/ble/disconnect: {}
+POST /api/control/start or /api/control/stop: {}
+POST /api/control/speed: {"value":41} means 4.1 km/h.
+POST /api/control/incline: {"value":3} means level 3.
+The web UI provides direct incline buttons for levels 1 through 15.
+Speed accepts relative deltas {"delta":1}, {"delta":-1}, {"delta":5},
+{"delta":-5} (0.1 or 0.5 km/h); inclination accepts +/-1 level.
+Relative adjustments are applied sequentially in the worker, not against
+a stale browser snapshot. Limits: 0-16 km/h, incline targets 1-15.
+The reference initialization still sends incline 0; a speed change preserves
+that last initialized value until an incline target is explicitly set.
+STOP discards queued commands and takes the next worker slot; it cannot
+interrupt a GATT transaction already in progress.
+POST /api/ble/raw: {"hex":"55 0A 01 02"}, literal 1-20 bytes.
+GET /api/logs?since=0: bounded 64-entry HEX/event ring; lost marks overrun.
+USB output is nonblocking; usbLogsDropped in status counts lines omitted when
+the host is not reading. The bounded web log remains available.
+202 means queued, NOT confirmed by the treadmill. Check status and logs.
+No authentication/TLS: use only an isolated trusted LAN. Do not expose ports.
+
+PROTOCOL LIMITATIONS / HARDWARE VALIDATION
+Reference: https://github.com/cagnulein/qdomyos-zwift/tree/master/src/devices/paferstreadmill
+This is an independent implementation of the wire format, not a copy of
+the upstream implementation. These Pafers treadmill frames have no checksum.
+The receive decoder follows the reference's 13-byte telemetry layout;
+unknown packets remain visible in HEX. Fragmented/concatenated frames are
+reassembled by the protocol module.
+Fractional speed writes use a hundredths byte inferred from RX and are
+EXPERIMENTAL. Validate 4.1 km/h against console and notifications first.
+The handshake follows the base treadmill variant (not iBoxster Plus).
+It sends STOP, a reference user profile, speed 1.0 and incline 0, but no
+START command. It is not proof of device compatibility or a safety interlock.
+Control is enabled after subscription and transmission of initialization,
+not after a proprietary acknowledgement (not documented by the reference).
+Some BH consoles report 1 km/h while stopped: that reading is marked
+ambiguous and excluded from movement time/distance estimates.
+Distance and time are integrated locally from fresh telemetry (<3 seconds),
+reset per BLE connection, and are NOT decoded console counters.
+Motion state is inferred or a console-button event, not an acknowledged
+result of a web command. Unknown/stale data is explicitly displayed.
+Verify the physical machine's speed/incline limits before use.
+Test with an empty belt, clear surroundings and the safety key accessible.
+Web STOP and BLE disconnect are NOT emergency-stop mechanisms.
+Firmware compilation cannot verify actual BH i.Booster compatibility.
+
+TESTS
+test_protocol.cpp is an independent host C++ test executable (no Arduino).
+With a host compiler: g++ -std=c++11 test\test_protocol.cpp -o .pio\test_protocol.exe
+Then run .pio\test_protocol.exe (0 = all checks passed).
+It covers wire commands, experimental decimals, bounds, literal HEX,
+handshake without START, telemetry validation and stream reassembly.
+PAFERS_FREESTANDING_TEST provides a CRT-free Windows entry for the existing
+Android NDK Clang toolchain when a desktop C++ runtime is not installed.
+Do not upload these host tests to a connected treadmill.
