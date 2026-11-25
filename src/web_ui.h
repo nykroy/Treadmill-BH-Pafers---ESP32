@@ -67,7 +67,7 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false, startSequenceActive=false, stopRequested=false, initialBleStart=false;
+let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false, startSequenceActive=false, stopRequested=false, stopPending=false, initialBleStart=false, restartAfterStop=false, connectionEpoch=0;
 async function api(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(6000)});
  const data=await response.json();if(!response.ok)throw Error(data.message||`HTTP ${response.status}`);return data;
@@ -83,9 +83,9 @@ function enable(){
  $('disconnect').disabled=!alive||updating||state?.state==='disconnected'||state?.state==='scanning';
  $('otaButton').disabled=!alive||updating||pending||!!state?.otaActive;
  $('otaFile').disabled=updating;
- $('stop').disabled=!connected||(stopped&&!startSequenceActive);
+ $('stop').disabled=!connected||stopPending||(stopped&&!startSequenceActive);
  if(connected&&pending)$('controls').disabled=false;
- const startDisabled=!connected||pending||running;
+ const startDisabled=!connected||pending||(running&&!restartAfterStop);
  $('start').disabled=startDisabled;$('startEco').disabled=startDisabled;
  document.querySelectorAll('#controls button:not(#stop):not(#start):not(#startEco)').forEach(b=>b.disabled=!connected||pending);
 }
@@ -100,6 +100,8 @@ function addLine(text,kind='log'){
  box.append(line);while(box.children.length>400)box.firstChild.remove();if(bottom)box.scrollTop=box.scrollHeight;
 }
 function render(s){
+ if(s.state!==state?.state||s.mode!==state?.mode)connectionEpoch++;
+ if(s.state!=='connected')restartAfterStop=false;
  if(s.mode==='satelite'&&s.state==='connected'&&state?.state!=='connected')initialBleStart=true;
  if(s.state!=='connected'||s.mode!=='satelite'||s.motion==='START en consola'||
     (s.telemetryFresh&&s.speed>0&&s.speed!==1))initialBleStart=false;
@@ -143,7 +145,7 @@ async function startMachine(eco){
  const message=eco
   ?'La banda comenzará a 1 km/h y con inclinación 4. Mantén la zona despejada y la llave de seguridad preparada. STOP web no sustituye la parada de emergencia física.'
   :'La banda puede comenzar a moverse. Mantén la zona despejada y la llave de seguridad preparada. STOP web no sustituye la parada de emergencia física.';
- if(!confirm(message))return;
+ if(!confirm(message+(restartAfterStop?' Comprueba físicamente que la cinta se ha detenido antes de volver a arrancar.':'')))return;
  startSequenceActive=true;stopRequested=false;pending=true;enable();$('notice').textContent='';
  let startAttempted=false;
  try{
@@ -153,7 +155,7 @@ async function startMachine(eco){
   }
   if(stopRequested)return;
   startAttempted=true;
-  initialBleStart=false;enable();
+  initialBleStart=false;restartAfterStop=false;enable();
   let result=await api('/api/control/start',{});$('notice').textContent=result.message;
   if(stopRequested)return;
   if(eco){result=await api('/api/control/incline',{value:4});$('notice').textContent=result.message;}
@@ -166,11 +168,21 @@ async function startMachine(eco){
    }catch(stopError){$('notice').textContent+=`; Error al solicitar STOP: ${stopError.message}`;}
   }
  }
- finally{startSequenceActive=false;pending=false;enable();}
+ finally{startSequenceActive=false;pending=stopPending;enable();}
 }
 $('start').onclick=()=>startMachine(false);
 $('startEco').onclick=()=>startMachine(true);
-$('stop').onclick=()=>{stopRequested=true;action('/api/control/stop');};
+$('stop').onclick=async()=>{
+ stopRequested=true;stopPending=true;
+ const epoch=connectionEpoch;
+ const accepted=await action('/api/control/stop');
+ stopPending=false;pending=startSequenceActive;
+ if(accepted&&epoch===connectionEpoch&&state?.state==='connected'){
+  restartAfterStop=true;
+  $('notice').textContent+=' Comprueba que la cinta se ha detenido antes de volver a arrancar.';
+ }
+ enable();
+};
 document.querySelectorAll('[data-speed]').forEach(b=>b.onclick=()=>action('/api/control/speed',{value:Number(b.dataset.speed)}));
 document.querySelectorAll('[data-step]').forEach(b=>b.onclick=()=>action('/api/control/speed',{delta:Number(b.dataset.step)}));
 document.querySelectorAll('[data-incline]').forEach(b=>b.onclick=()=>action('/api/control/incline',{delta:Number(b.dataset.incline)}));
