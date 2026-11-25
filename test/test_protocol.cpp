@@ -1,4 +1,6 @@
 #include "../src/pafers_protocol.h"
+#include "../src/ftms_protocol.h"
+#include "../src/satellite_idle.h"
 
 static bool equal(const pafers::Frame& frame, const uint8_t* expected, size_t size) {
     if (frame.size != size) return false;
@@ -59,6 +61,61 @@ int runProtocolTests() {
     if (stream.push(255, accept)) return 19;
     for (uint8_t byte : startEvent) stream.push(byte, accept);
     if (received != 4) return 20;
+    const uint8_t ftmsSpeed[] = {2, 0x9a, 0x01};
+    auto ftmsCommand = ftms::decodeControl(ftmsSpeed, sizeof(ftmsSpeed));
+    if (ftmsCommand.action != ftms::Action::Speed || ftmsCommand.value != 41) return 22;
+    const uint8_t badSpeed[] = {2, 0x9b, 0x01};
+    if (ftms::decodeControl(badSpeed, sizeof(badSpeed)).action != ftms::Action::Invalid) return 23;
+    const uint8_t ftmsIncline[] = {3, 150, 0};
+    ftmsCommand = ftms::decodeControl(ftmsIncline, sizeof(ftmsIncline));
+    if (ftmsCommand.action != ftms::Action::Incline || ftmsCommand.value != 15) return 24;
+    const uint8_t badIncline[] = {3, 0xff, 0xff};
+    if (ftms::decodeControl(badIncline, sizeof(badIncline)).action != ftms::Action::Invalid) return 25;
+    const uint8_t pause[] = {8, 2};
+    if (ftms::decodeControl(pause, sizeof(pause)).action != ftms::Action::Unsupported) return 26;
+    uint8_t ftmsData[11];
+    ftms::treadmillData(ftmsData, 250, 4, 23, 1000);
+    const uint8_t expectedFtms[] = {0x0c,0,250,0,0xe8,3,0,40,0,23,0};
+    for (size_t i = 0; i < sizeof(expectedFtms); ++i)
+        if (ftmsData[i] != expectedFtms[i]) return 27;
+    const uint8_t control[] = {0}, startFtms[] = {7}, stopFtms[] = {8, 1};
+    const uint8_t maxFtmsSpeed[] = {2, 0x40, 0x06}, tooFast[] = {2, 0x4a, 0x06};
+    const uint8_t belowIncline[] = {3, 0, 0}, fractionalIncline[] = {3, 15, 0};
+    if (ftms::decodeControl(control, sizeof(control)).action != ftms::Action::RequestControl ||
+        ftms::decodeControl(startFtms, sizeof(startFtms)).action != ftms::Action::Start ||
+        ftms::decodeControl(stopFtms, sizeof(stopFtms)).action != ftms::Action::Stop ||
+        ftms::decodeControl(stopFtms, 1).action != ftms::Action::Invalid) return 28;
+    if (ftms::decodeControl(maxFtmsSpeed, sizeof(maxFtmsSpeed)).value != 160 ||
+        ftms::decodeControl(tooFast, sizeof(tooFast)).action != ftms::Action::Invalid ||
+        ftms::decodeControl(belowIncline, sizeof(belowIncline)).action != ftms::Action::Invalid ||
+        ftms::decodeControl(fractionalIncline, sizeof(fractionalIncline)).action != ftms::Action::Invalid) return 29;
+    ftms::treadmillData(ftmsData, 0, 0, 0, 0x1000000);
+    if (ftmsData[4] != 0xff || ftmsData[5] != 0xff || ftmsData[6] != 0xff) return 30;
+    SatelliteIdle idle;
+    idle.connected(1000);
+    if (idle.expired(600999, true) || !idle.expired(601000, true)) return 31;
+    idle.start();
+    if (idle.expired(1201000, true)) return 32;
+    idle.stop(1201000);
+    idle.telemetry(1301000, 250);
+    if (idle.expired(1900999, true) || !idle.expired(1901000, true)) return 33;
+    idle.stop(2000000);
+    idle.telemetry(2001000, 100);
+    if (!idle.expired(2600000, true)) return 34;
+    idle.stop(3000000);
+    if (idle.expired(3600000, false) || idle.expired(4199999, true) ||
+        !idle.expired(4200000, true)) return 35;
+    idle.disconnected();
+    if (idle.expired(4800000, true)) return 36;
+    idle.connected(0xffffff00U);
+    if (idle.expired(0xffffff00U + 599999U, true) ||
+        !idle.expired(0xffffff00U + 600000U, true)) return 37;
+    auto revision = idle.startRevision();
+    idle.start();
+    idle.stopIfUnchanged(100, revision);
+    if (idle.expired(600100, true)) return 38;
+    idle.stopIfUnchanged(100, idle.startRevision());
+    if (!idle.expired(600100, true)) return 39;
     return 0;
 }
 

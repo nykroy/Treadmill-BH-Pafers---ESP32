@@ -4,9 +4,16 @@
 #include <ESPmDNS.h>
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
+#include <Update.h>
 #include <atomic>
+#include "config.h"
 #include "pafers_protocol.h"
+#include "treadmill_transport.h"
+#include "ftms_server.h"
 #include "web_ui.h"
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+#include "satellite_idle.h"
+#endif
 
 #include "wifi_config.h"
 const IPAddress LOCAL_IP(192, 168, 218, 61);
@@ -26,6 +33,12 @@ struct Request {
     int value = 0;
     bool relative = false;
     pafers::Frame frame;
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+    bool fromFtms = false;
+    uint16_t ftmsHandle = 0;
+    uint32_t ftmsToken = 0;
+    uint8_t ftmsOpcode = 0;
+#endif
 };
 struct Device {
     char name[64]{};
@@ -57,6 +70,9 @@ struct SharedState {
     char motion[32] = "Desconocido";
     double distanceKm = 0;
     double elapsedSeconds = 0;
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+    SatelliteIdle idle;
+#endif
 } shared;
 
 class Guard {
@@ -98,14 +114,12 @@ void logHex(const char* direction, const uint8_t* bytes, size_t length) {
     }
 }
 
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
 NimBLEClient* client = nullptr;
 NimBLERemoteCharacteristic* writer = nullptr;
 std::atomic<bool> linkLost{false};
-std::atomic<bool> cancelConnection{false};
-std::atomic<bool> bleReady{false};
 std::atomic<bool> expectedDisconnect{false};
 std::atomic<int> scanReason{-1};
-pafers::StreamDecoder decoder;
 
 class ScanCallbacks : public NimBLEScanCallbacks {
     void onScanEnd(const NimBLEScanResults&, int reason) override { scanReason.store(reason); }
@@ -119,24 +133,42 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         logMessage(message);
     }
 } clientCallbacks;
+#endif
 
-void notification(NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
-    logHex("RX <- BLE", data, length);
+std::atomic<bool> cancelConnection{false};
+std::atomic<bool> bleReady{false};
+std::atomic<bool> otaActive{false};
+std::atomic<bool> otaPaused{false};
+pafers::StreamDecoder decoder;
+
+void receivedData(const uint8_t* data, size_t length) {
+    logHex(treadmill::rxLabel(), data, length);
     bool valid = true;
     for (size_t i = 0; i < length; ++i) {
         valid = decoder.push(data[i], [](const pafers::Decoded& packet) {
             Guard guard;
             if (packet.kind == pafers::Kind::Telemetry) {
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                uint32_t now = millis();
+                if (!shared.telemetry || now - shared.telemetryAt >= 3000) shared.idle.defer(now);
+#endif
                 shared.telemetry = true;
                 shared.telemetryAt = millis();
                 shared.speedHundredths = packet.speedHundredths;
                 shared.incline = packet.incline;
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                shared.idle.telemetry(shared.telemetryAt, packet.speedHundredths);
+#endif
                 // Some BH consoles report exactly 1 km/h even when stopped.
                 snprintf(shared.motion, sizeof(shared.motion), "%s",
                     packet.speedHundredths == 100 ? "Ambiguo (1 km/h)" :
                     packet.speedHundredths ? "Movimiento (inferido)" : "Parada (inferida)");
             } else if (packet.kind == pafers::Kind::StartButton ||
                        packet.kind == pafers::Kind::StopButton) {
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                if (packet.kind == pafers::Kind::StartButton) shared.idle.start();
+                else shared.idle.stop(millis());
+#endif
                 snprintf(shared.motion, sizeof(shared.motion), "%s",
                     packet.kind == pafers::Kind::StartButton ? "START en consola" : "STOP en consola");
             }
@@ -145,19 +177,22 @@ void notification(NimBLERemoteCharacteristic*, uint8_t* data, size_t length, boo
     if (!valid) logMessage("RX: bytes fuera de trama o longitud invalida");
 }
 
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+void notification(NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
+    treadmill::receive(data, length);
+}
+#endif
+
 bool sendFrame(const pafers::Frame& frame) {
-    if (!frame.size || !client || !client->isConnected() || !writer) {
-        errorMessage("TX rechazado: BLE no disponible o trama vacia");
+    if (!treadmill::write(frame)) {
+        errorMessage("TX rechazado: transporte no disponible o escritura fallida");
         return false;
     }
-    if (!writer->writeValue(frame.bytes, frame.size, writer->canWrite())) {
-        errorMessage("Error GATT al escribir");
-        return false;
-    }
-    logHex("TX -> BLE", frame.bytes, frame.size);
+    logHex(treadmill::txLabel(), frame.bytes, frame.size);
     return true;
 }
 
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
 bool closeConnection() {
     if (client && client->isConnected()) {
         expectedDisconnect.store(true);
@@ -168,12 +203,14 @@ bool closeConnection() {
         }
     }
     writer = nullptr;
+    treadmill::setBleConnection(nullptr, nullptr);
     Guard guard;
     shared.state = BleState::Disconnected;
     shared.gatt = false;
     shared.rssiValid = false;
     shared.telemetry = false;
     shared.address[0] = 0;
+    shared.idle.disconnected();
     snprintf(shared.motion, sizeof(shared.motion), "Desconocido");
     return true;
 }
@@ -245,10 +282,12 @@ bool connectDevice(const Request& request) {
         errorMessage("GATT Pafers Write/Notify no compatible");
         return false;
     }
+    { Guard guard; shared.idle.connected(millis()); }
     if (!notify->subscribe(true, notification)) {
         errorMessage("Fallo al suscribirse a Notify");
         return false;
     }
+    treadmill::setBleConnection(client, writer);
     { Guard guard; shared.gatt = true; }
     for (size_t i = 0; i < pafers::HandshakeSteps; ++i) {
         if (cancelConnection.load() || !sendFrame(pafers::handshake(i))) return false;
@@ -262,34 +301,96 @@ bool connectDevice(const Request& request) {
         shared.targetIncline = 0;
         shared.distanceKm = 0;
         shared.elapsedSeconds = 0;
+        shared.idle.defer(millis());
         snprintf(shared.address, sizeof(shared.address), "%s", request.address);
     }
     logMessage("BLE conectado; inicializacion transmitida (sin confirmacion de consola)");
     return true;
 }
+#endif
+
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+bool submitFtms(const ftms::Command& command, uint16_t handle, uint32_t token) {
+    Request request{};
+    request.fromFtms = true;
+    request.ftmsHandle = handle;
+    request.ftmsToken = token;
+    request.ftmsOpcode = command.opcode;
+    request.value = command.value;
+    switch (command.action) {
+        case ftms::Action::Start: request.operation = Operation::Start; break;
+        case ftms::Action::Stop: request.operation = Operation::Stop; break;
+        case ftms::Action::Speed: request.operation = Operation::Speed; break;
+        case ftms::Action::Incline: request.operation = Operation::Incline; break;
+        default: return false;
+    }
+    Guard guard;
+    if (otaActive.load() || !bleReady.load() || shared.state != BleState::Connected) return false;
+    if (request.operation == Operation::Stop) xQueueReset(commands);
+    return xQueueSend(commands, &request, 0) == pdTRUE;
+}
+#endif
 
 void bleWorker(void*) {
     bool initAttempted = false;
-    uint32_t lastKeepAlive = millis(), lastRssi = 0, lastEstimate = millis();
+    uint32_t lastKeepAlive = millis(), lastEstimate = millis();
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+    uint32_t lastRssi = 0;
+    uint32_t lastIdleDisconnectAttempt = 0;
+#else
+    uint32_t lastFtmsPublish = 0;
+#endif
     for (;;) {
+        if (otaActive.load()) {
+            Request discarded{};
+            while (xQueueReceive(commands, &discarded, 0) == pdTRUE) {
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                if (discarded.fromFtms)
+                    ftms::complete(discarded.ftmsHandle, discarded.ftmsToken, discarded.ftmsOpcode, false);
+#endif
+                logMessage("Orden descartada por actualizacion OTA");
+            }
+            otaPaused.store(true);
+            while (otaActive.load()) vTaskDelay(pdMS_TO_TICKS(20));
+            otaPaused.store(false);
+            lastKeepAlive = millis();
+            lastEstimate = millis();
+            continue;
+        }
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+        treadmill::poll();
+#endif
         if (!bleReady.load()) {
             if (!initAttempted && WiFi.status() == WL_CONNECTED) {
                 initAttempted = true;
                 logMessage("Wi-Fi asociado; inicializando el controlador BLE");
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
                 if (NimBLEDevice::init("BH-Web-Bridge")) bleReady.store(true);
                 else errorMessage("No se pudo inicializar NimBLE");
+#else
+                if (!NimBLEDevice::init("BH-iBooster-FTMS") || !ftms::begin(submitFtms, logMessage))
+                    errorMessage("No se pudo iniciar el servidor FTMS");
+                else {
+                    bleReady.store(true);
+                    Guard guard;
+                    shared.state = BleState::Connected;
+                }
+#endif
             }
             if (!bleReady.load()) {
                 vTaskDelay(pdMS_TO_TICKS(250));
                 continue;
             }
         }
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
         if (linkLost.exchange(false)) {
             errorMessage("Enlace BLE cerrado; reconexion solo manual");
             closeConnection();
         }
+#endif
         Request request{};
         if (xQueueReceive(commands, &request, pdMS_TO_TICKS(20)) == pdTRUE) {
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
             if (request.operation == Operation::Scan) scanDevices();
             else if (request.operation == Operation::Connect) {
                 if (!connectDevice(request)) closeConnection();
@@ -298,16 +399,40 @@ void bleWorker(void*) {
             } else if (request.operation == Operation::Disconnect) {
                 if (closeConnection()) logMessage("Desconexion manual solicitada");
             } else {
+#else
+            {
+                if (request.fromFtms && !ftms::authorized(request.ftmsHandle, request.ftmsToken)) {
+                    ftms::complete(request.ftmsHandle, request.ftmsToken, request.ftmsOpcode, false);
+                    errorMessage("Orden FTMS descartada: cliente sin control");
+                    continue;
+                }
+#endif
                 bool connected;
                 { Guard guard; connected = shared.state == BleState::Connected; }
                 if (!connected || cancelConnection.load()) {
                     errorMessage("Orden descartada: enlace ya no disponible");
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                    if (request.fromFtms) ftms::complete(request.ftmsHandle, request.ftmsToken, request.ftmsOpcode, false);
+#endif
                     continue;
                 }
                 bool sent = false;
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                bool rawStop = request.operation == Operation::Raw && request.frame.size == 4 &&
+                    request.frame.bytes[0] == 0x55 && request.frame.bytes[1] == 0x0a &&
+                    request.frame.bytes[2] == 1 && request.frame.bytes[3] == 2;
+                uint32_t startRevision;
+                { Guard guard; startRevision = shared.idle.startRevision(); }
+#endif
                 if (request.operation == Operation::Start) sent = sendFrame(pafers::start());
                 if (request.operation == Operation::Stop) sent = sendFrame(pafers::stop());
                 if (request.operation == Operation::Raw) sent = sendFrame(request.frame);
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                if (sent && (request.operation == Operation::Stop || rawStop)) {
+                    Guard guard;
+                    shared.idle.stopIfUnchanged(millis(), startRevision);
+                }
+#endif
                 if (request.operation == Operation::Speed || request.operation == Operation::Incline) {
                     int speed, incline;
                     { Guard guard; speed = shared.targetSpeed; incline = shared.targetIncline; }
@@ -318,20 +443,31 @@ void bleWorker(void*) {
                         (request.operation == Operation::Incline && !pafers::validInclineTarget(incline)) ||
                         (request.operation == Operation::Speed && (incline < 0 || incline > pafers::MaxIncline))) {
                         errorMessage("Ajuste rechazado: limite de velocidad o inclinacion");
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                        if (request.fromFtms) ftms::complete(request.ftmsHandle, request.ftmsToken, request.ftmsOpcode, false);
+#endif
                         continue;
                     }
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
                     sent = sendFrame(pafers::speed(speed));
                     if (sent) {
                         vTaskDelay(pdMS_TO_TICKS(400));
                         sent = !cancelConnection.load() && sendFrame(pafers::incline(incline));
                     }
+#else
+                    sent = request.operation == Operation::Speed
+                        ? sendFrame(pafers::speed(speed)) : sendFrame(pafers::incline(incline));
+#endif
                     if (sent) {
                         Guard guard;
                         shared.targetSpeed = speed;
                         shared.targetIncline = incline;
                     }
                 }
-                if (!sent) errorMessage("Orden BLE no completada");
+                if (!sent) errorMessage("Orden de transporte no completada");
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                if (request.fromFtms) ftms::complete(request.ftmsHandle, request.ftmsToken, request.ftmsOpcode, sent);
+#endif
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
@@ -339,10 +475,33 @@ void bleWorker(void*) {
         { Guard guard; connected = shared.state == BleState::Connected; }
         uint32_t now = millis();
         if (connected && !cancelConnection.load()) {
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+            bool idleExpired;
+            {
+                Guard guard;
+                idleExpired = shared.idle.expired(now, shared.telemetry && now - shared.telemetryAt < 3000);
+                if (idleExpired && now - lastIdleDisconnectAttempt >= 5000)
+                    shared.state = BleState::Disconnected;
+                else idleExpired = false;
+            }
+            if (idleExpired) {
+                lastIdleDisconnectAttempt = now;
+                if (closeConnection()) {
+                    logMessage("BLE desconectado automaticamente: 10 minutos sin START tras conexion o STOP");
+                    continue;
+                }
+                { Guard guard; shared.state = BleState::Connected; }
+            }
+#endif
             if (now - lastKeepAlive >= 500) {
-                if (!sendFrame(pafers::keepAlive())) closeConnection();
+                if (!sendFrame(pafers::keepAlive())) {
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                    closeConnection();
+#endif
+                }
                 lastKeepAlive = now;
             }
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
             if (now - lastRssi >= 2000 && client->isConnected()) {
                 int rssi = client->getRssi();
                 Guard guard;
@@ -350,13 +509,36 @@ void bleWorker(void*) {
                 shared.rssiValid = rssi != 0;
                 lastRssi = now;
             }
-            Guard guard;
-            if (shared.telemetry && now - shared.telemetryAt < 3000 &&
-                shared.speedHundredths > 0 && shared.speedHundredths != 100) {
-                double seconds = (now - lastEstimate) / 1000.0;
-                shared.elapsedSeconds += seconds;
-                shared.distanceKm += shared.speedHundredths / 100.0 * seconds / 3600.0;
+#endif
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+            bool publish = false;
+            uint16_t speed = 0;
+            uint8_t incline = 0;
+            uint32_t distance = 0;
+#endif
+            {
+                Guard guard;
+                if (shared.telemetry && now - shared.telemetryAt < 3000 &&
+                    shared.speedHundredths > 0 && shared.speedHundredths != 100) {
+                    double seconds = (now - lastEstimate) / 1000.0;
+                    shared.elapsedSeconds += seconds;
+                    shared.distanceKm += shared.speedHundredths / 100.0 * seconds / 3600.0;
+                }
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                publish = shared.telemetry && now - shared.telemetryAt < 3000 && now - lastFtmsPublish >= 1000;
+                if (publish) {
+                    speed = shared.speedHundredths;
+                    incline = shared.incline;
+                    distance = static_cast<uint32_t>(shared.distanceKm * 1000);
+                }
+#endif
             }
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+            if (publish) {
+                ftms::publish(speed, incline, distance);
+                lastFtmsPublish = now;
+            }
+#endif
         }
         lastEstimate = now;
     }
@@ -385,6 +567,11 @@ bool validAddress(const char* address) {
 }
 void submit(Operation operation) {
     if (!bleReady.load()) { reply(503, "Backend BLE todavia no disponible"); return; }
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+    if (operation == Operation::Scan || operation == Operation::Connect || operation == Operation::Disconnect) {
+        reply(409, "Gestion BLE de satelite no disponible en modo UART"); return;
+    }
+#endif
     Request request{};
     request.operation = operation;
     JsonDocument document;
@@ -443,30 +630,139 @@ void submit(Operation operation) {
     }
     int code = 202;
     const char* message = "Operacion encolada; consultar /api/status";
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+    Request cancelledFtms{};
+    bool hasCancelledFtms = false;
+#endif
     {
         Guard guard;
         BleState before = shared.state;
         bool management = operation == Operation::Scan || operation == Operation::Connect;
-        if ((management && before != BleState::Disconnected) ||
+        if (otaActive.load()) {
+            code = 409; message = "Actualizacion OTA en curso";
+        } else if ((management && before != BleState::Disconnected) ||
             (!management && operation != Operation::Disconnect && before != BleState::Connected)) {
             code = 409; message = "Operacion incompatible con el estado BLE";
         } else {
             if (operation == Operation::Scan) shared.state = BleState::Scanning;
             if (operation == Operation::Connect) shared.state = BleState::Connecting;
             if (operation == Operation::Disconnect || operation == Operation::Stop) {
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+                Request discarded{};
+                while (xQueueReceive(commands, &discarded, 0) == pdTRUE) {
+                    if (discarded.fromFtms) {
+                        cancelledFtms = discarded;
+                        hasCancelledFtms = true;
+                    }
+                }
+#else
                 xQueueReset(commands);
+#endif
             }
             if (xQueueSend(commands, &request, 0) != pdTRUE) {
                 shared.state = before;
                 code = 503; message = "Cola BLE llena";
             } else {
                 shared.error[0] = 0;
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+                if (operation == Operation::Start || operation == Operation::Raw)
+                    shared.idle.start();
+#endif
                 if (operation == Operation::Connect) cancelConnection.store(false);
                 if (operation == Operation::Disconnect) cancelConnection.store(true);
             }
         }
     }
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+    if (hasCancelledFtms)
+        ftms::complete(cancelledFtms.ftmsHandle, cancelledFtms.ftmsToken, cancelledFtms.ftmsOpcode, false);
+#endif
     reply(code, message);
+}
+
+bool otaFileSeen = false;
+bool otaFileComplete = false;
+bool otaOwnsPause = false;
+String otaError;
+
+void otaFailure(const String& message) {
+    if (otaError.length()) return;
+    otaError = message;
+    if (Update.isRunning()) Update.abort();
+    errorMessage(otaError.c_str());
+}
+
+void otaRelease() {
+    if (otaOwnsPause) otaActive.store(false);
+    otaOwnsPause = false;
+    otaFileSeen = false;
+    otaFileComplete = false;
+    otaError = "";
+}
+
+void otaUpload() {
+    if (!server.hasUpload()) return;
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        if (otaFileSeen) { otaFailure("OTA: solo se admite un archivo"); return; }
+        otaFileSeen = true;
+        otaError = "";
+        if (upload.name != "firmware" || !upload.filename.endsWith(".bin")) {
+            otaFailure("OTA: selecciona un archivo firmware .bin");
+            return;
+        }
+        bool allowed;
+        {
+            Guard guard;
+#if MODO_ACTUAL == MODO_OPERACION_SATELITE
+            allowed = !otaActive.load() && !otaPaused.load() && shared.state == BleState::Disconnected;
+#else
+            allowed = !otaActive.load() && !otaPaused.load();
+#endif
+            if (allowed) { otaActive.store(true); otaOwnsPause = true; }
+        }
+        if (!allowed) {
+            otaFailure("OTA: desconecta BLE y espera a que terminen las operaciones");
+            return;
+        }
+        uint32_t started = millis();
+        while (!otaPaused.load() && millis() - started < 10000) delay(20);
+        if (!otaPaused.load()) {
+            otaFailure("OTA: no se pudo detener el procesamiento de ordenes");
+            return;
+        }
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            otaFailure(String("OTA: ") + Update.errorString());
+            return;
+        }
+        logMessage("OTA: carga iniciada; controles y transporte en pausa");
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!otaError.length() && Update.isRunning() &&
+            Update.write(upload.buf, upload.currentSize) != upload.currentSize)
+            otaFailure(String("OTA: ") + Update.errorString());
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (!otaError.length() && upload.totalSize > 0) otaFileComplete = true;
+        else if (!otaError.length()) otaFailure("OTA: archivo vacio");
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        otaFailure("OTA: carga interrumpida");
+        otaRelease();
+    }
+}
+
+void otaFinish() {
+    if (!otaError.length() && (!otaFileSeen || !otaFileComplete || !Update.isRunning()))
+        otaFailure("OTA: falta el archivo firmware completo");
+    if (!otaError.length() && !Update.end(true))
+        otaFailure(String("OTA: ") + Update.errorString());
+    if (otaError.length()) {
+        reply(400, otaError.c_str());
+        otaRelease();
+        return;
+    }
+    logMessage("OTA: imagen validada; reiniciando");
+    reply(200, "Firmware aceptado; reiniciando el ESP32");
+    delay(250);
+    ESP.restart();
 }
 
 void status() {
@@ -475,7 +771,14 @@ void status() {
         Guard guard;
         const char* names[] = {"disconnected", "scanning", "connecting", "connected"};
         document["state"] = names[static_cast<int>(shared.state)];
+#if MODO_ACTUAL == MODO_OPERACION_INTEGRADO
+        document["mode"] = "integrado";
+        document["ftmsClients"] = ftms::clients();
+#else
+        document["mode"] = "satelite";
+#endif
         document["error"] = shared.error;
+        document["otaActive"] = otaActive.load();
         document["usbLogsDropped"] = usbLogsDropped.load();
         document["address"] = shared.address;
         if (shared.rssiValid) document["rssi"] = shared.rssi;
@@ -540,6 +843,10 @@ void setup() {
         Serial.println("ERROR FATAL: sin memoria para sincronizacion BLE");
         while (true) delay(1000);
     }
+    if (!treadmill::begin(receivedData)) {
+        errorMessage("ERROR FATAL: no se pudo inicializar el transporte");
+        while (true) delay(1000);
+    }
     WiFi.mode(WIFI_STA);
     WiFi.setHostname("cinta");
     WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
@@ -573,6 +880,7 @@ void setup() {
     server.on("/api/control/stop", HTTP_POST, [] { submit(Operation::Stop); });
     server.on("/api/control/speed", HTTP_POST, [] { submit(Operation::Speed); });
     server.on("/api/control/incline", HTTP_POST, [] { submit(Operation::Incline); });
+    server.on("/api/ota", HTTP_POST, otaFinish, otaUpload);
     server.onNotFound([] { reply(404, "Ruta no encontrada"); });
     server.begin();
     if (xTaskCreate(bleWorker, "ble-worker", 8192, nullptr, 1, nullptr) != pdPASS)

@@ -20,17 +20,20 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 .tx{color:#7ee9bc}.rx{color:#85baff}.log{color:#c6cddd}.warning{color:#ffd58b}
 @media(max-width:500px){body{padding:10px}.card{padding:14px}button{flex-grow:1}.row input{width:100%}}
 </style></head><body>
-<h1>BH Fitness <span class="muted">i.Booster / Fase 1</span></h1>
-<section class="card"><h2>Panel de Conexi&oacute;n Bluetooth</h2>
+<h1>BH Fitness web</h1>
+<section class="card"><h2 id="connectionTitle">Panel de Conexi&oacute;n Bluetooth</h2>
+<div id="blePanel">
 <p id="bleState" role="status">Desconectado</p>
 <div class="row"><button id="scan">Escanear BLE</button><button id="connect" class="primary">Conectar</button><button id="disconnect">Desconectar</button></div>
 <p><select id="devices" style="width:100%" aria-label="Dispositivo BLE"><option value="">PAFERS_C7BE99 (escanear primero)</option></select></p>
-<div class="muted" id="scanInfo"></div><p class="muted">Servicio: <code id="service">--</code><br>Write: <code id="write">--</code><br>Notify: <code id="notify">--</code></p>
+<div class="muted" id="scanInfo"></div><p class="muted">Servicio: <code id="service">--</code><br>Write: <code id="write">--</code><br>Notify: <code id="notify">--</code></p></div>
+<div id="uartPanel" hidden><p id="uartState" role="status">UART no disponible</p><p id="ftmsState">FTMS: sin clientes</p>
+<p class="muted">UART inicializada no confirma conexi&oacute;n f&iacute;sica. La compatibilidad con la consola debe verificarse.</p></div>
 <div id="error" role="alert"></div><p id="notice" role="status" class="muted"></p></section>
 <section class="card"><h2>Telemetr&iacute;a</h2><div class="grid">
 <div class="metric"><span>Velocidad actual</span><b id="speed">--</b><small>km/h</small></div>
 <div class="metric"><span>Inclinaci&oacute;n</span><b id="incline">--</b><small>nivel</small></div>
-<div class="metric"><span>Distancia estimada</span><b id="distance">0.000</b><small>km / sesi&oacute;n BLE</small></div>
+<div class="metric"><span>Distancia estimada</span><b id="distance">0.000</b><small id="distanceUnit">km / sesi&oacute;n BLE</small></div>
 <div class="metric"><span>Tiempo estimado</span><b id="elapsed">00:00</b><small>en movimiento</small></div></div>
 <p id="motion" class="muted">Estado desconocido</p></section>
 <section class="card"><h2>Control de la cinta</h2>
@@ -46,23 +49,30 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 <button data-incline-value="6" aria-label="Inclinaci&oacute;n 6">6</button><button data-incline-value="7" aria-label="Inclinaci&oacute;n 7">7</button><button data-incline-value="8" aria-label="Inclinaci&oacute;n 8">8</button><button data-incline-value="9" aria-label="Inclinaci&oacute;n 9">9</button><button data-incline-value="10" aria-label="Inclinaci&oacute;n 10">10</button>
 <button data-incline-value="11" aria-label="Inclinaci&oacute;n 11">11</button><button data-incline-value="12" aria-label="Inclinaci&oacute;n 12">12</button><button data-incline-value="13" aria-label="Inclinaci&oacute;n 13">13</button><button data-incline-value="14" aria-label="Inclinaci&oacute;n 14">14</button><button data-incline-value="15" aria-label="Inclinaci&oacute;n 15">15</button></div></fieldset>
 <p class="muted">L&iacute;mites: 0-16 km/h, inclinaci&oacute;n 1-15. Los decimales TX son experimentales. 1 km/h recibido es ambiguo en algunas consolas BH. No se inventan checksums ni confirmaciones.</p></section>
+<section class="card"><h2>Actualizaci&oacute;n OTA</h2>
+<p class="warning">Sin contrase&ntilde;a: cualquiera en la red puede instalar firmware. Usa solo una red de confianza. Det&eacute;n la cinta f&iacute;sicamente antes de actualizar; se perder&aacute; el control y el ESP32 se reiniciar&aacute;.</p>
+<p class="muted">En modo sat&eacute;lite desconecta primero el BLE. Selecciona el firmware.bin compilado para este ESP32 y no cortes la alimentaci&oacute;n.</p>
+<form id="otaForm"><div class="row"><input id="otaFile" class="grow" type="file" accept=".bin" aria-label="Firmware binario" required><button id="otaButton">Actualizar firmware</button></div></form>
+<p id="otaStatus" role="status" class="muted"></p></section>
 <section class="card"><h2>Consola HEX en vivo</h2><div id="console" role="log" aria-label="Paquetes BLE"></div>
 <form id="rawForm"><p class="row"><input id="hex" class="grow" placeholder="55 0A 01 02" maxlength="60" aria-label="Trama hexadecimal" autocomplete="off"><button id="raw" disabled>Enviar HEX</button></p></form>
 <p class="muted">1-20 bytes. HEX se transmite literalmente, sin checksum a&ntilde;adido. Solo red local de confianza; sin autenticaci&oacute;n. <span id="usbWarning"></span></p></section>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-let state=null, generation=-1, cursor=0, pending=false, alive=false;
+let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false;
 async function api(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(6000)});
  const data=await response.json();if(!response.ok)throw Error(data.message||`HTTP ${response.status}`);return data;
 }
 function enable(){
- const connected=alive&&state?.state==='connected';
+ const connected=alive&&!updating&&!state?.otaActive&&state?.state==='connected';
  $('controls').disabled=!connected||pending;$('raw').disabled=!connected||pending;
- $('scan').disabled=!alive||pending||state?.state!=='disconnected';
- $('connect').disabled=!alive||pending||state?.state!=='disconnected'||!$('devices').value;
- $('disconnect').disabled=!alive||state?.state==='disconnected'||state?.state==='scanning';
+ $('scan').disabled=!alive||updating||pending||state?.state!=='disconnected';
+ $('connect').disabled=!alive||updating||pending||state?.state!=='disconnected'||!$('devices').value;
+ $('disconnect').disabled=!alive||updating||state?.state==='disconnected'||state?.state==='scanning';
+ $('otaButton').disabled=!alive||updating||pending||!!state?.otaActive;
+ $('otaFile').disabled=updating;
  // STOP must remain available while another request is in flight.
  $('stop').disabled=!connected;
  if(connected&&pending)$('controls').disabled=false;
@@ -80,6 +90,14 @@ function addLine(text,kind='log'){
 }
 function render(s){
  state=s;alive=true;
+ const integrated=s.mode==='integrado';
+ $('blePanel').hidden=integrated;$('uartPanel').hidden=!integrated;
+ $('connectionTitle').textContent=integrated?'Estado UART / FTMS':'Panel de Conexión Bluetooth';
+ $('distanceUnit').textContent=integrated?'km / sesión UART':'km / sesión BLE';
+ if(integrated){
+  $('uartState').textContent=s.state!=='connected'?'UART / FTMS no disponible':s.telemetryFresh?'UART activa: datos recientes':'UART inicializada: sin datos recientes';
+  $('ftmsState').textContent=`FTMS: ${s.ftmsClients?'cliente conectado':'sin clientes'}`;
+ }
  const labels={disconnected:'Desconectado',scanning:'Escaneando...',connecting:'Conectando...',connected:'Conectado'};
  $('bleState').textContent=labels[s.state]+(s.state==='connected'?` - RSSI: ${s.rssi??'--'} dBm`:'');
  $('bleState').className=s.state==='connected'?'good':'';
@@ -114,7 +132,26 @@ document.querySelectorAll('[data-step]').forEach(b=>b.onclick=()=>action('/api/c
 document.querySelectorAll('[data-incline]').forEach(b=>b.onclick=()=>action('/api/control/incline',{delta:Number(b.dataset.incline)}));
 document.querySelectorAll('[data-incline-value]').forEach(b=>b.onclick=()=>action('/api/control/incline',{value:Number(b.dataset.inclineValue)}));
 $('rawForm').onsubmit=e=>{e.preventDefault();if(!alive||state?.state!=='connected'||pending)return;if(confirm('Enviar trama HEX literal? Puede mover o reconfigurar la cinta.'))action('/api/ble/raw',{hex:$('hex').value});};
+$('otaForm').onsubmit=e=>{
+ e.preventDefault();
+ const file=$('otaFile').files[0];
+ if(!alive||updating||pending||!file)return;
+ if(state?.mode==='satelite'&&state.state!=='disconnected'){$('otaStatus').textContent='Desconecta BLE antes de actualizar.';return;}
+ if(!file.name.endsWith('.bin')||!file.size){$('otaStatus').textContent='Selecciona un archivo .bin no vacio.';return;}
+ if(!confirm('Confirma que la cinta esta parada y vacia. Durante la actualizacion no habra control y el ESP32 se reiniciara. Continuar?'))return;
+ updating=true;enable();$('otaStatus').textContent='Preparando actualizacion...';
+ const form=new FormData();form.append('firmware',file);
+ const xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');xhr.responseType='json';xhr.timeout=120000;
+ xhr.upload.onprogress=event=>{if(event.lengthComputable)$('otaStatus').textContent=`Enviando: ${Math.floor(event.loaded/event.total*100)} %; despues se verificara el firmware.`;};
+ xhr.onload=()=>{
+  if(xhr.status>=200&&xhr.status<300){$('otaStatus').textContent='Firmware aceptado. Reiniciando; espera y vuelve a abrir la pagina.';setTimeout(()=>location.reload(),8000);}
+  else{updating=false;$('otaStatus').textContent=xhr.response?.message||`Error HTTP ${xhr.status}`;enable();}
+ };
+ xhr.onerror=xhr.ontimeout=()=>{updating=false;$('otaStatus').textContent='Conexion interrumpida: resultado incierto. Espera y comprueba el ESP32 antes de reintentar.';enable();};
+ xhr.send(form);
+};
 async function poll(){
+ if(updating){setTimeout(poll,700);return;}
  try{
   render(await api('/api/status'));
   const logs=await api(`/api/logs?since=${cursor}`);

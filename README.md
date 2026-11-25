@@ -2,11 +2,15 @@
 
 The Spanish version is available below: **[Leer en español](#espanol)**.
 
-An experimental project for controlling a BH Fitness treadmill using an **ESP32-C3**, Wi-Fi and Bluetooth Low Energy (BLE). The ESP32 serves a web page and acts as a client of the treadmill's Pafers/i.Concept module. The device used during development advertises itself as `PAFERS_C7BE99`.
+An experimental project for controlling a BH Fitness treadmill using an **ESP32-C3**, Wi-Fi and Bluetooth Low Energy (BLE). In satellite mode the ESP32 serves a web page and acts as a client of the treadmill's Pafers/i.Concept module. The device used during development advertises itself as `PAFERS_C7BE99`. An experimental integrated UART/FTMS mode can be selected at compile time.
 
 > **Safety:** begin testing with the belt empty, the surrounding area clear and the safety key within reach. Connecting sends initialization commands, including STOP. The web STOP button and BLE disconnection **do not replace the physical emergency stop**. Compatibility and fractional speeds must be checked on each machine.
 
 > **Network security:** the web interface and API have no authentication or HTTPS. Any device that can reach the ESP32 can attempt to control the treadmill. Use it only on an isolated, trusted local network; do not expose its port to the Internet.
+
+> **OTA security:** firmware upload is intentionally unauthenticated and unencrypted. Anyone who can reach the ESP32 can install arbitrary firmware; a malicious web page opened on a device with local network access may also submit an upload. The `.bin` can contain your Wi-Fi credentials; do not publish it or transfer it over an untrusted network.
+
+> **FTMS security:** in integrated mode the BLE service is also unauthenticated. A nearby BLE client can request control and send commands. Do not enable this mode in an uncontrolled environment.
 
 ## Features
 
@@ -17,6 +21,30 @@ An experimental project for controlling a BH Fitness treadmill using an **ESP32-
 - Speed and incline telemetry, with distance and time **estimated by the ESP32**.
 - HEX console showing transmitted and received packets, with manual transmission of up to 20 bytes.
 - USB serial diagnostic output at 115200 baud.
+- Firmware updates from the web in both modes, without a password.
+
+## Operating modes
+
+Select one mode before compiling in [`src/config.h`](src/config.h). There is still a single PlatformIO environment:
+
+```cpp
+#define MODO_ACTUAL MODO_OPERACION_SATELITE
+// Or: #define MODO_ACTUAL MODO_OPERACION_INTEGRADO
+```
+
+**Satellite** is the default and is the mode used by the BLE scan/connect instructions below. It retains the Pafers BLE client and existing web controls.
+
+In satellite mode, the ESP32 disconnects from the selected BLE device after 10 minutes without a START following connection or a STOP command/event. A START from the web or treadmill console cancels the timer until the next STOP. Recognized telemetry indicating movement also postpones disconnection. Recent valid telemetry must continue arriving; otherwise the timer restarts. A 1.0 km/h reading is ambiguous on this machine and is not treated as definite movement: the timer relies on the observed START/STOP events in that case, which may not detect every physical operation. Sending an arbitrary raw HEX frame cancels the timer until a recognized STOP is sent or received. The disconnect is logged in the HEX console, and reconnection is manual. This is not a safety stop and does not guarantee that the treadmill enters standby.
+
+**Integrated** is experimental and has **not been validated against the physical UART**. It uses `Serial1` at 9600 baud, 8N1, with RX GPIO20 and TX GPIO21, configured in `src/config.h`. Before wiring, independently verify the console pinout, logic voltage, common ground, electrical protection, available board pins and actual protocol. Never assume that the BLE frames or 3.3 V levels are safe on an unidentified connector.
+
+In integrated mode, the web interface replaces the BLE scan panel with UART/FTMS status. An initialized UART does **not** prove that the physical link is connected; recent valid telemetry is shown separately. No motion initialization sequence is sent at startup. The UART sends periodic keep-alives, and sends control frames when requested by the web or an FTMS client.
+
+The ESP32 advertises `BH-iBooster-FTMS` with treadmill data and a control point. FTMS control requires a client to request control and subscribe to indications. Speed, incline, start and stop are supported; pause and reset are not implemented. A successful response means the UART write was accepted locally, **not** that the treadmill confirmed it. Interoperability with Kinomap, Zwift and QZ has not yet been verified.
+
+For this treadmill, the user-confirmed mapping is **one Pafers incline level = 1% grade**; the FTMS ramp angle is calculated from that grade. Verify the mapping on the physical machine before using incline control. FTMS speed requests must be in 0.1 km/h steps, and incline requests in whole levels 1–15; unsupported increments are rejected rather than rounded. Distance is estimated locally, not read from the console. FTMS telemetry is sent only while UART telemetry is recent.
+
+The remainder of the connection and control instructions describes **satellite mode**, except where noted. To use integrated mode, change the selector, build and upload again only after confirming the hardware is safe.
 
 ## Screenshots
 
@@ -117,6 +145,17 @@ The configuration retains `ARDUINO_USB_MODE=1` and `ARDUINO_USB_CDC_ON_BOOT=1`. 
 
 **Uploading restarts the ESP32 and disconnects BLE.** Do not upload while the treadmill is in use. After restarting, BLE must be connected manually again.
 
+### Subsequent updates over Wi-Fi (OTA)
+
+The currently running firmware must already include OTA; install it once over USB first. Keep a physical USB recovery option accessible and test the complete OTA process before enclosing the board.
+
+1. Stop the treadmill physically, remove all users and clear the area. OTA does not send STOP, and web/FTMS control and keep-alives are paused during the upload. The physical emergency stop remains essential.
+2. Select the intended mode and network settings in the source, then compile with PlatformIO. In satellite mode, disconnect the BLE device in the web interface and wait until it shows disconnected. In integrated mode, ensure the treadmill is physically stopped; UART initialization or telemetry alone does not prove this.
+3. Open the **Actualización OTA** panel, choose `.pio/build/esp32-c3-devkitm-1/firmware.bin`, confirm the warning and wait for the transfer, validation and restart. Upload only an application image built for this ESP32-C3 and compatible partition layout, not a bootloader, partition table or merged image.
+4. Reopen the web page after reboot. If the uploaded build changed Wi-Fi, IP or mode, use its new settings. Satellite BLE reconnection is manual. If the result is uncertain after a network interruption, check whether the device returned before retrying.
+
+The upload streams into the inactive app partition and rejects invalid or oversized images. The current partition remains untouched during transfer, but automatic rollback for a firmware that boots incorrectly is not guaranteed. OTA does not change the partition table, and it cannot recover a device whose new firmware cannot connect to the configured Wi-Fi; USB recovery may be necessary. Do not remove power during the update. The `.bin` embeds build-time Wi-Fi settings and may contain secrets even though `wifi_config.h` is ignored by Git.
+
 ## 4. Use the web interface
 
 1. Turn on the treadmill and leave its BLE module available; another application may already be connected to it.
@@ -163,6 +202,8 @@ Browser --HTTP/JSON--> WebServer / command queue
 | --- | --- |
 | [`src/main.cpp`](src/main.cpp) | Wi-Fi, mDNS, HTTP, shared state, command queue, BLE worker, GATT and logs. |
 | [`src/pafers_protocol.h`](src/pafers_protocol.h) | UUIDs, command encoding, initialization, validation and frame decoding. It does not depend on the web server. |
+| [`src/config.h`](src/config.h), [`src/treadmill_transport.h`](src/treadmill_transport.h), [`src/treadmill_transport.cpp`](src/treadmill_transport.cpp) | Compile-time mode selection and shared BLE/UART transport. |
+| [`src/ftms_protocol.h`](src/ftms_protocol.h), [`src/ftms_server.cpp`](src/ftms_server.cpp) | FTMS frame decoding/encoding and experimental BLE peripheral. |
 | [`src/web_ui.h`](src/web_ui.h) | HTML, CSS and JavaScript served from program memory. |
 | [`src/wifi_config.example.h`](src/wifi_config.example.h) | Credential-free template for creating local configuration. |
 | [`platformio.ini`](platformio.ini), [`partitions.csv`](partitions.csv) | Board, dependencies, USB and flash memory layout. |
@@ -180,11 +221,15 @@ On connection, these UUIDs are searched:
 
 After subscribing, nine initialization frames for the base variant are sent: they include STOP, a reference profile, speed 1 km/h and incline 0, but **not** START. While connected, the worker sends a periodic keep-alive. If the link is lost, the error is reported and the user must reconnect.
 
-Frames use the form `55 <opcode> <length> <data>`; this implementation does not add a checksum. The decoder reconstructs fragmented or concatenated frames and recognizes 13-byte telemetry and some button events. This is an independent implementation based on [qdomyos-zwift: paferstreadmill](https://github.com/cagnulein/qdomyos-zwift/tree/master/src/devices/paferstreadmill), not an official BH specification. Replacing BLE with UART in a future phase will require backend work; it is not implemented.
+Frames use the form `55 <opcode> <length> <data>`; this implementation does not add a checksum. The decoder reconstructs fragmented or concatenated frames and recognizes 13-byte telemetry and some button events. This is an independent implementation based on [qdomyos-zwift: paferstreadmill](https://github.com/cagnulein/qdomyos-zwift/tree/master/src/devices/paferstreadmill), not an official BH specification. The integrated UART transport uses the same frame encoder, but its physical compatibility remains unverified.
 
 ## HTTP API
 
 POST routes accept JSON when parameters are required. A **202** response means the operation was queued, not that the treadmill executed it. Check `error`, `state` and the log to follow the result. An incompatible operation can return 409; a full queue or uninitialized BLE can return 503.
+
+In integrated mode `/api/status` reports `mode: "integrado"` and `ftmsClients`; BLE scan, connect and disconnect requests return 409. The raw route and control routes use UART instead. In satellite mode `mode` is `"satelite"`.
+
+`POST /api/ota` accepts one multipart file field named `firmware`. It requires satellite BLE to be disconnected, pauses the command worker in both modes and responds with JSON; success is followed by a reboot. There is no authentication.
 
 | Method and route | Purpose / body |
 | --- | --- |
@@ -238,11 +283,15 @@ The executable returns `0` if the tests pass. The first PlatformIO build creates
 
 # Puente web para cinta BH Fitness i.Booster
 
-Proyecto experimental para controlar una cinta BH Fitness mediante un **ESP32-C3**, Wi-Fi y Bluetooth Low Energy (BLE). El ESP32 sirve una página web y actúa como cliente del módulo Pafers/i.Concept de la cinta. El dispositivo utilizado durante el desarrollo anuncia el nombre `PAFERS_C7BE99`.
+Proyecto experimental para controlar una cinta BH Fitness mediante un **ESP32-C3**, Wi-Fi y Bluetooth Low Energy (BLE). En modo satélite, el ESP32 sirve una página web y actúa como cliente del módulo Pafers/i.Concept de la cinta. El dispositivo utilizado durante el desarrollo anuncia el nombre `PAFERS_C7BE99`. También se puede seleccionar al compilar un modo integrado UART/FTMS experimental.
 
 > **Seguridad:** prueba inicialmente con la banda vacía, la zona despejada y la llave de seguridad al alcance. La conexión envía comandos de inicialización, incluido STOP. El botón STOP de la web y la desconexión BLE **no sustituyen la parada de emergencia física**. La compatibilidad y las velocidades decimales deben comprobarse en cada máquina.
 
 > **Seguridad de red:** la web y la API no tienen autenticación ni HTTPS. Cualquier dispositivo que pueda acceder al ESP32 puede intentar controlar la cinta. Úsalo solo en una red local aislada y de confianza; no abras el puerto a Internet.
+
+> **Seguridad OTA:** la carga de firmware no tiene contraseña ni cifrado por decisión de diseño. Cualquiera que acceda al ESP32 puede instalar firmware arbitrario; una página web maliciosa abierta en un dispositivo con acceso a la red local también podría iniciar una carga. El `.bin` puede contener las credenciales Wi-Fi; no lo publiques ni lo transmitas por una red no confiable.
+
+> **Seguridad FTMS:** en modo integrado el servicio BLE tampoco tiene autenticación. Un cliente BLE cercano puede solicitar el control y enviar órdenes. No actives este modo en un entorno no controlado.
 
 ## Funciones
 
@@ -253,6 +302,30 @@ Proyecto experimental para controlar una cinta BH Fitness mediante un **ESP32-C3
 - Telemetría de velocidad e inclinación, con distancia y tiempo **estimados por el ESP32**.
 - Consola HEX con paquetes transmitidos y recibidos y envío manual de hasta 20 bytes.
 - Salida de diagnóstico por USB serie a 115200 baudios.
+- Actualización de firmware desde la web en ambos modos, sin contraseña.
+
+## Modos de funcionamiento
+
+Selecciona el modo antes de compilar en [`src/config.h`](src/config.h). El proyecto mantiene un único entorno PlatformIO:
+
+```cpp
+#define MODO_ACTUAL MODO_OPERACION_SATELITE
+// O bien: #define MODO_ACTUAL MODO_OPERACION_INTEGRADO
+```
+
+El modo **satélite** es el predeterminado y corresponde a las instrucciones de escaneo y conexión BLE descritas más abajo. Conserva el cliente Pafers BLE y los controles web.
+
+En modo satélite, el ESP32 desconecta el dispositivo BLE seleccionado tras 10 minutos sin START después de la conexión o de un comando/evento STOP. Un START desde la web o la consola de la cinta cancela el temporizador hasta el siguiente STOP. La telemetría que indica movimiento inequívoco también aplaza la desconexión. Debe seguir llegando telemetría válida reciente; si falta, el plazo se reinicia. Una lectura de 1,0 km/h es ambigua en esta máquina y no se considera movimiento inequívoco: en ese caso el temporizador depende de los eventos START/STOP observados, que podrían no detectar todas las operaciones físicas. El envío de una trama HEX arbitraria cancela el temporizador hasta enviar o recibir un STOP reconocido. La desconexión se registra en la consola HEX y la reconexión es manual. No es una parada de seguridad ni garantiza que la cinta entre en reposo.
+
+El modo **integrado** es experimental y **no se ha validado con la UART física**. Utiliza `Serial1` a 9600 baudios, 8N1, con RX GPIO20 y TX GPIO21, configurables en `src/config.h`. Antes de soldar, verifica por separado el pinout de la consola, los niveles lógicos, la masa común, la protección eléctrica, los pines disponibles de la placa y el protocolo real. No supongas que las tramas BLE o los niveles de 3,3 V son seguros en un conector no identificado.
+
+En modo integrado, la web sustituye el panel de escaneo BLE por el estado UART/FTMS. Una UART inicializada **no** confirma que exista conexión física; la llegada de telemetría válida reciente se indica por separado. Al arrancar no se envía la secuencia de inicialización de movimiento. La UART envía keep-alives periódicos y envía comandos de control cuando los solicitan la web o un cliente FTMS.
+
+El ESP32 anuncia `BH-iBooster-FTMS` con datos de cinta y un punto de control. El cliente FTMS debe suscribirse a indicaciones y solicitar el control. Se admiten velocidad, inclinación, inicio y parada; pausa y reset no están implementados. Una respuesta correcta significa que la escritura UART se aceptó localmente, **no** que la cinta la haya confirmado. Todavía no se ha verificado la interoperabilidad con Kinomap, Zwift ni QZ.
+
+Para esta cinta, el usuario ha confirmado la equivalencia **un nivel Pafers = 1 % de pendiente**; el ángulo FTMS se calcula a partir de esa pendiente. Verifica la equivalencia en la máquina física antes de usar la inclinación. Las velocidades FTMS deben llegar en pasos de 0,1 km/h y las inclinaciones en niveles enteros de 1–15; los incrementos no admitidos se rechazan, no se redondean. La distancia es una estimación local, no un contador leído de la consola. Solo se envía telemetría FTMS mientras haya datos UART recientes.
+
+El resto de las instrucciones de conexión y control describe el **modo satélite**, salvo indicación contraria. Para usar el integrado, cambia el selector y vuelve a compilar y cargar solo después de comprobar la seguridad del hardware.
 
 ## Capturas
 
@@ -353,6 +426,17 @@ La configuración conserva `ARDUINO_USB_MODE=1` y `ARDUINO_USB_CDC_ON_BOOT=1`. L
 
 **La carga reinicia el ESP32 y corta el enlace BLE.** No la realices mientras se utiliza la cinta. Tras reiniciar, hay que conectar BLE manualmente de nuevo.
 
+### Actualizaciones posteriores por Wi-Fi (OTA)
+
+El firmware que esté funcionando debe incluir ya OTA; instálalo primero una vez por USB. Mantén accesible una conexión USB de recuperación y prueba el proceso OTA completo antes de cerrar el montaje.
+
+1. Detén físicamente la cinta, retira a las personas y despeja la zona. OTA no envía STOP; durante la carga se pausan el control web/FTMS y los keep-alives. La parada de emergencia física sigue siendo imprescindible.
+2. Selecciona en el código el modo y la configuración de red deseados y compila con PlatformIO. En modo satélite, desconecta el dispositivo BLE desde la web y espera a que indique desconectado. En modo integrado, comprueba físicamente que la cinta está parada; la UART inicializada o la telemetría por sí solas no lo garantizan.
+3. Abre el panel **Actualización OTA**, selecciona `.pio/build/esp32-c3-devkitm-1/firmware.bin`, acepta el aviso y espera a la transferencia, validación y reinicio. Envía únicamente una imagen de aplicación compilada para este ESP32-C3 y una tabla de particiones compatible, no el bootloader, la tabla de particiones ni una imagen combinada.
+4. Vuelve a abrir la web tras el reinicio. Si el firmware nuevo cambia la Wi-Fi, la IP o el modo, usa su nueva configuración. En satélite la conexión BLE vuelve a ser manual. Si una interrupción de red deja el resultado incierto, comprueba si el dispositivo ha vuelto antes de reintentar.
+
+La carga escribe por partes en la partición de aplicación inactiva y rechaza imágenes inválidas o demasiado grandes. La partición actual no se sobrescribe durante la transferencia, pero no se garantiza la reversión automática si el nuevo firmware arranca mal. OTA no cambia la tabla de particiones ni puede recuperar un equipo cuyo firmware nuevo no se conecte a la Wi-Fi configurada; puede ser necesario recuperarlo por USB. No cortes la alimentación durante la actualización. El `.bin` incorpora la configuración Wi-Fi de compilación y puede contener secretos aunque `wifi_config.h` esté ignorado por Git.
+
 ## 4. Uso desde la web
 
 1. Enciende la cinta y deja libre su módulo BLE; otra aplicación podría estar conectada a él.
@@ -399,6 +483,8 @@ Navegador --HTTP/JSON--> WebServer / cola de órdenes
 | --- | --- |
 | [`src/main.cpp`](src/main.cpp) | Wi-Fi, mDNS, HTTP, estado compartido, cola de órdenes, tarea BLE, GATT y registros. |
 | [`src/pafers_protocol.h`](src/pafers_protocol.h) | UUID, codificación de comandos, inicialización, validación y decodificación de tramas. No depende del servidor web. |
+| [`src/config.h`](src/config.h), [`src/treadmill_transport.h`](src/treadmill_transport.h), [`src/treadmill_transport.cpp`](src/treadmill_transport.cpp) | Selección de modo en compilación y transporte compartido BLE/UART. |
+| [`src/ftms_protocol.h`](src/ftms_protocol.h), [`src/ftms_server.cpp`](src/ftms_server.cpp) | Codificación y decodificación FTMS y periférico BLE experimental. |
 | [`src/web_ui.h`](src/web_ui.h) | HTML, CSS y JavaScript servidos desde la memoria de programa. |
 | [`src/wifi_config.example.h`](src/wifi_config.example.h) | Plantilla sin credenciales para crear la configuración local. |
 | [`platformio.ini`](platformio.ini), [`partitions.csv`](partitions.csv) | Placa, dependencias, USB y distribución de la memoria flash. |
@@ -416,11 +502,15 @@ Al conectar se buscan estos UUID:
 
 Tras suscribirse, se envían nueve tramas de inicialización de la variante base: incluyen STOP, perfil de referencia, velocidad de 1 km/h e inclinación 0, pero **no** START. Mientras está conectado, el trabajador envía un keep-alive periódicamente. Si se pierde el enlace se informa del error y la reconexión queda a cargo del usuario.
 
-La trama utilizada tiene la forma `55 <opcode> <longitud> <datos>`; esta implementación no añade checksum. El decodificador reconstruye tramas fragmentadas o concatenadas y reconoce la telemetría de 13 bytes y algunos eventos de botones. Es una implementación independiente basada en la referencia [qdomyos-zwift: paferstreadmill](https://github.com/cagnulein/qdomyos-zwift/tree/master/src/devices/paferstreadmill), no una especificación oficial de BH. La futura sustitución de BLE por UART requerirá trabajo en el backend; no está implementada.
+La trama utilizada tiene la forma `55 <opcode> <longitud> <datos>`; esta implementación no añade checksum. El decodificador reconstruye tramas fragmentadas o concatenadas y reconoce la telemetría de 13 bytes y algunos eventos de botones. Es una implementación independiente basada en la referencia [qdomyos-zwift: paferstreadmill](https://github.com/cagnulein/qdomyos-zwift/tree/master/src/devices/paferstreadmill), no una especificación oficial de BH. El transporte UART integrado utiliza el mismo codificador, pero su compatibilidad física aún no está verificada.
 
 ## API HTTP
 
 Las rutas POST reciben JSON cuando necesitan parámetros. Una respuesta **202** indica que la operación se ha encolado, no que la cinta la haya ejecutado. Consulta `error`, `state` y el registro para seguir el resultado. Una operación incompatible puede devolver 409; una cola llena o un BLE no inicializado, 503.
+
+En modo integrado `/api/status` devuelve `mode: "integrado"` y `ftmsClients`; las peticiones de escaneo, conexión y desconexión BLE devuelven 409. Las rutas de control y envío HEX utilizan UART. En modo satélite `mode` vale `"satelite"`.
+
+`POST /api/ota` recibe un único archivo multipart con el nombre de campo `firmware`. Exige que el BLE satélite esté desconectado, pausa la tarea de comandos en ambos modos y responde con JSON; si tiene éxito, reinicia. No requiere autenticación.
 
 | Método y ruta | Función / cuerpo |
 | --- | --- |
