@@ -268,8 +268,24 @@ bool connectDevice(const Request& request) {
         client->setClientCallbacks(&clientCallbacks, false);
         client->setConnectTimeout(8000);
     }
-    if (!client->connect(NimBLEAddress(std::string(request.address), request.addressType))) {
-        errorMessage("No se pudo conectar al dispositivo seleccionado");
+    bool connected = false;
+    for (uint8_t attempt = 1; attempt <= 3; ++attempt) {
+        if (cancelConnection.load()) return false;
+        if (client->connect(NimBLEAddress(std::string(request.address), request.addressType))) {
+            connected = true;
+            break;
+        }
+        if (attempt < 3 && !cancelConnection.load()) {
+            char message[80];
+            snprintf(message, sizeof(message), "Conexion BLE fallida (%u/3); reintentando",
+                static_cast<unsigned>(attempt));
+            logMessage(message);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
+    if (cancelConnection.load()) return false;
+    if (!connected) {
+        errorMessage("No se pudo conectar al dispositivo seleccionado tras 3 intentos");
         return false;
     }
     if (cancelConnection.load()) return false;

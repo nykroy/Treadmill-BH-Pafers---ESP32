@@ -162,7 +162,7 @@ The upload streams into the inactive app partition and rejects invalid or oversi
 2. Power the ESP32 and wait for it to associate with the configured Wi-Fi.
 3. On a computer or phone on the same network, open `http://192.168.218.61/`, or your configured IP address. If mDNS works, you can also use `http://cinta.local/`.
 4. Press **Escanear BLE** (Scan BLE). The scan lasts five seconds and retains up to 24 devices; name, MAC address and RSSI are shown. If the limit is reached, scan again closer to the treadmill.
-5. Select the treadmill from the list and press **Conectar** (Connect). The ESP32 discovers the service and characteristics, subscribes to Notify and sends initialization.
+5. Select the treadmill from the list and press **Conectar** (Connect). The ESP32 makes up to three BLE connection attempts, then discovers the service and characteristics, subscribes to Notify and sends initialization.
 6. Wait for **Conectado** (Connected). Controls are enabled after initialization is transmitted, **not** after a specific acknowledgement from the console.
 7. With the area clear, test START, STOP and adjustments gradually. Check the results on the treadmill's physical console. To finish, use STOP and then **Desconectar** (Disconnect).
 
@@ -170,6 +170,7 @@ The ESP32 does not connect automatically at startup or reconnect when the link i
 
 ### Controls and limits
 
+- With recent telemetry, STOP is disabled at 0 km/h and START and START (ECO) are disabled above 0 km/h. A console that reports 1 km/h while stopped will therefore disable both START buttons. Without recent telemetry, speed does not disable either button.
 - Speed buttons change the target in tenths; presets range from 2 to 16 km/h. The software limit is 0–16 km/h. Check the limits of your model.
 - Incline is adjusted by ±1 or by selecting an integer from 1 to 15. On connection, the reference sequence initially sends incline **0**; this does not change the selectable 1–15 range.
 - When adjusting speed or incline, the firmware sends the speed target followed by the incline target. The value displayed as the sent target is not an acknowledgement from the console.
@@ -443,7 +444,7 @@ La carga escribe por partes en la partición de aplicación inactiva y rechaza i
 2. Alimenta el ESP32 y espera a que se asocie a la Wi-Fi configurada.
 3. Desde el ordenador o móvil en la misma red abre `http://192.168.218.61/`, o la IP que hayas configurado. Si mDNS funciona, también puedes usar `http://cinta.local/`.
 4. Pulsa **Escanear BLE**. El escaneo dura cinco segundos y conserva hasta 24 dispositivos; se muestran nombre, MAC y RSSI. Si se alcanza el límite, repite el escaneo cerca de la cinta.
-5. Selecciona la cinta en la lista y pulsa **Conectar**. El ESP32 descubre el servicio y las características, se suscribe a Notify y transmite la inicialización.
+5. Selecciona la cinta en la lista y pulsa **Conectar**. El ESP32 intenta conectar por BLE hasta tres veces y, después, descubre el servicio y las características, se suscribe a Notify y transmite la inicialización.
 6. Espera al estado **Conectado**. Los controles se habilitan después de transmitir la inicialización, **no** tras recibir una confirmación específica de la consola.
 7. Con la zona libre, prueba START, STOP y los ajustes gradualmente. Verifica los resultados en la consola física de la cinta. Para terminar, utiliza STOP y después **Desconectar**.
 
@@ -451,6 +452,7 @@ El ESP32 no conecta automáticamente al arrancar ni reconecta si se pierde el en
 
 ### Controles y límites
 
+- Con telemetría reciente, STOP se deshabilita a 0 km/h y START y START (ECO) por encima de 0 km/h. Si la consola indica 1 km/h estando parada, ambos botones START quedarán deshabilitados. Sin telemetría reciente, la velocidad no deshabilita ninguno de los botones.
 - Los botones de velocidad cambian el objetivo en décimas; los accesos directos van de 2 a 16 km/h. El límite software es 0–16 km/h. Comprueba los límites de tu modelo.
 - La inclinación se ajusta con ±1 o seleccionando un entero de 1 a 15. Al conectar, la secuencia de referencia envía inicialmente inclinación **0**; esto no modifica el rango seleccionable de 1–15.
 - Al ajustar velocidad o inclinación, el firmware transmite el objetivo de velocidad y después el de inclinación. El valor mostrado como «objetivo enviado» no es una confirmación de la consola.
