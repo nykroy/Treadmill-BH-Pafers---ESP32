@@ -9,6 +9,8 @@ body{max-width:980px;margin:auto;padding:20px}h1{font-size:1.6rem}h2{font-size:1
 .card{background:#151e33;border:1px solid #293754;border-radius:18px;padding:20px;margin:16px 0}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.grow{flex:1;min-width:170px}
 .speed-steps,.incline-steps{flex-wrap:nowrap;margin-bottom:10px}.speed-steps button,.incline-steps button{flex:1;min-width:0;padding:12px 4px}
+.run-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;width:100%}
+.run-controls button{width:100%;min-height:68px;font-size:1.35rem;font-weight:700}
 button,input,select{font:inherit;border:1px solid #46567b;border-radius:10px;padding:12px;background:#223252;color:inherit}
 button{cursor:pointer;touch-action:manipulation}button:hover{background:#30476c}button:disabled{opacity:.35;cursor:not-allowed}
 .primary{background:#116b65}.stop{background:#9e303c}.muted{color:#a7b6d2;font-size:.85rem}
@@ -37,8 +39,7 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 <div class="metric"><span>Tiempo estimado</span><b id="elapsed">00:00</b><small>en movimiento</small></div></div>
 <p id="motion" class="muted">Estado desconocido</p></section>
 <section class="card"><h2>Control de la cinta</h2>
-<p class="warning">Prueba inicial sin nadie sobre la banda, zona libre y llave de seguridad al alcance. STOP web no sustituye la parada de emergencia.</p>
-<fieldset id="controls" disabled><div class="row"><button id="start" class="primary">START</button><button id="stop" class="stop">STOP</button></div>
+<fieldset id="controls" disabled><div class="run-controls"><button id="start" class="primary">START</button><button id="stop" class="stop">STOP</button></div>
 <p>Velocidad objetivo enviada: <b id="target">1.0</b> km/h <span class="muted">(no es confirmaci&oacute;n)</span></p>
 <div class="row speed-steps"><button data-step="-5">-0.5</button><button data-step="-1">-0.1</button><button data-step="1">+0.1</button><button data-step="5">+0.5</button></div>
 <div class="row"><button data-speed="20">2.0</button><button data-speed="40">4.0</button><button data-speed="60">6.0</button><button data-speed="80">8.0</button><button data-speed="100">10.0</button><button data-speed="120">12.0</button><button data-speed="140">14.0</button><button data-speed="160">16.0</button></div>
@@ -60,28 +61,31 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false;
+let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false, startRequested=false;
 async function api(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(6000)});
  const data=await response.json();if(!response.ok)throw Error(data.message||`HTTP ${response.status}`);return data;
 }
 function enable(){
  const connected=alive&&!updating&&!state?.otaActive&&state?.state==='connected';
+ const running=state?.motion==='START en consola'||(state?.telemetryFresh&&state.speed>0);
+ const stopped=state?.telemetryFresh&&state.speed===0&&state.motion!=='START en consola';
  $('controls').disabled=!connected||pending;$('raw').disabled=!connected||pending;
  $('scan').disabled=!alive||updating||pending||state?.state!=='disconnected';
  $('connect').disabled=!alive||updating||pending||state?.state!=='disconnected'||!$('devices').value;
  $('disconnect').disabled=!alive||updating||state?.state==='disconnected'||state?.state==='scanning';
  $('otaButton').disabled=!alive||updating||pending||!!state?.otaActive;
  $('otaFile').disabled=updating;
- // STOP must remain available while another request is in flight.
- $('stop').disabled=!connected;
+ // Keep STOP available while a START request awaits telemetry.
+ $('stop').disabled=!connected||(stopped&&!startRequested);
  if(connected&&pending)$('controls').disabled=false;
- document.querySelectorAll('#controls button:not(#stop)').forEach(b=>b.disabled=!connected||pending);
+ $('start').disabled=!connected||pending||running||startRequested;
+ document.querySelectorAll('#controls button:not(#stop):not(#start)').forEach(b=>b.disabled=!connected||pending);
 }
 async function action(path,body={}){
  pending=true;enable();$('notice').textContent='';
- try{const result=await api(path,body);$('notice').textContent=result.message;}
- catch(error){$('notice').textContent=error.message;}finally{pending=false;enable();}
+ try{const result=await api(path,body);$('notice').textContent=result.message;return true;}
+ catch(error){$('notice').textContent=error.message;return false;}finally{pending=false;enable();}
 }
 function addLine(text,kind='log'){
  const line=document.createElement('div');line.className=kind;line.textContent=text;
@@ -90,6 +94,7 @@ function addLine(text,kind='log'){
 }
 function render(s){
  state=s;alive=true;
+ if(s.motion==='START en consola'||(s.telemetryFresh&&s.speed>0))startRequested=false;
  const integrated=s.mode==='integrado';
  $('blePanel').hidden=integrated;$('uartPanel').hidden=!integrated;
  $('connectionTitle').textContent=integrated?'Estado UART / FTMS':'Panel de Conexión Bluetooth';
@@ -125,8 +130,13 @@ $('scan').onclick=()=>action('/api/ble/scan');
 $('connect').onclick=()=>{const o=$('devices').selectedOptions[0];action('/api/ble/connect',{address:o.value,type:Number(o.dataset.type)});};
 $('disconnect').onclick=()=>action('/api/ble/disconnect');
 $('devices').onchange=enable;
-$('start').onclick=()=>{if(confirm('La banda puede comenzar a moverse. Zona libre y llave de seguridad preparada?'))action('/api/control/start');};
-$('stop').onclick=()=>action('/api/control/stop');
+$('start').onclick=async()=>{
+ if(!confirm('La banda puede comenzar a moverse. Mantén la zona despejada y la llave de seguridad preparada. STOP web no sustituye la parada de emergencia física.'))return;
+ startRequested=true;enable();
+ if(!await action('/api/control/start'))startRequested=false;
+ enable();
+};
+$('stop').onclick=()=>{startRequested=false;action('/api/control/stop');};
 document.querySelectorAll('[data-speed]').forEach(b=>b.onclick=()=>action('/api/control/speed',{value:Number(b.dataset.speed)}));
 document.querySelectorAll('[data-step]').forEach(b=>b.onclick=()=>action('/api/control/speed',{delta:Number(b.dataset.step)}));
 document.querySelectorAll('[data-incline]').forEach(b=>b.onclick=()=>action('/api/control/incline',{delta:Number(b.dataset.incline)}));
