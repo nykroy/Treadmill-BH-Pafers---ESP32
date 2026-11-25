@@ -66,9 +66,13 @@ async function api(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(6000)});
  const data=await response.json();if(!response.ok)throw Error(data.message||`HTTP ${response.status}`);return data;
 }
+function isRunning(s){
+ // Some BH consoles report 1 km/h even while stopped.
+ return s?.motion==='START en consola'||(s?.telemetryFresh&&s.speed>1);
+}
 function enable(){
  const connected=alive&&!updating&&!state?.otaActive&&state?.state==='connected';
- const running=state?.motion==='START en consola'||(state?.telemetryFresh&&state.speed>0);
+ const running=isRunning(state);
  const stopped=state?.telemetryFresh&&state.speed===0&&state.motion!=='START en consola';
  $('controls').disabled=!connected||pending;$('raw').disabled=!connected||pending;
  $('scan').disabled=!alive||updating||pending||state?.state!=='disconnected';
@@ -94,7 +98,7 @@ function addLine(text,kind='log'){
 }
 function render(s){
  state=s;alive=true;
- if(s.motion==='START en consola'||(s.telemetryFresh&&s.speed>0))startRequested=false;
+ if(isRunning(s))startRequested=false;
  const integrated=s.mode==='integrado';
  $('blePanel').hidden=integrated;$('uartPanel').hidden=!integrated;
  $('connectionTitle').textContent=integrated?'Estado UART / FTMS':'Panel de Conexión Bluetooth';
