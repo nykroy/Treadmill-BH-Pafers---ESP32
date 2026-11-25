@@ -67,22 +67,23 @@ fieldset{border:0;padding:0;margin:0}#console{background:#070c17;height:260px;ov
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false, startSequenceActive=false, stopRequested=false;
+let state=null, generation=-1, cursor=0, pending=false, alive=false, updating=false, startSequenceActive=false, stopRequested=false, initialBleStart=false;
 async function api(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(6000)});
  const data=await response.json();if(!response.ok)throw Error(data.message||`HTTP ${response.status}`);return data;
 }
 function enable(){
  const connected=alive&&!updating&&!state?.otaActive&&state?.state==='connected';
- const running=state?.telemetryFresh&&state.speed>0;
- const stopped=state?.telemetryFresh&&state.speed===0;
+ const initialAmbiguous=initialBleStart&&state?.telemetryFresh&&state.speed===1;
+ const running=state?.telemetryFresh&&state.speed>0&&!initialAmbiguous;
+ const stopped=initialAmbiguous||(state?.telemetryFresh&&state.speed===0);
  $('controls').disabled=!connected||pending;$('raw').disabled=!connected||pending;
  $('scan').disabled=!alive||updating||pending||state?.state!=='disconnected';
  $('connect').disabled=!alive||updating||pending||state?.state!=='disconnected'||!$('devices').value;
  $('disconnect').disabled=!alive||updating||state?.state==='disconnected'||state?.state==='scanning';
  $('otaButton').disabled=!alive||updating||pending||!!state?.otaActive;
  $('otaFile').disabled=updating;
- $('stop').disabled=!connected||stopped;
+ $('stop').disabled=!connected||(stopped&&!startSequenceActive);
  if(connected&&pending)$('controls').disabled=false;
  const startDisabled=!connected||pending||running;
  $('start').disabled=startDisabled;$('startEco').disabled=startDisabled;
@@ -99,6 +100,9 @@ function addLine(text,kind='log'){
  box.append(line);while(box.children.length>400)box.firstChild.remove();if(bottom)box.scrollTop=box.scrollHeight;
 }
 function render(s){
+ if(s.mode==='satelite'&&s.state==='connected'&&state?.state!=='connected')initialBleStart=true;
+ if(s.state!=='connected'||s.mode!=='satelite'||s.motion==='START en consola'||
+    (s.telemetryFresh&&s.speed>0&&s.speed!==1))initialBleStart=false;
  state=s;alive=true;
  const integrated=s.mode==='integrado';
  $('blePanel').hidden=integrated;$('uartPanel').hidden=!integrated;
@@ -149,6 +153,7 @@ async function startMachine(eco){
   }
   if(stopRequested)return;
   startAttempted=true;
+  initialBleStart=false;enable();
   let result=await api('/api/control/start',{});$('notice').textContent=result.message;
   if(stopRequested)return;
   if(eco){result=await api('/api/control/incline',{value:4});$('notice').textContent=result.message;}

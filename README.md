@@ -170,7 +170,7 @@ The ESP32 does not connect automatically at startup or reconnect when the link i
 
 ### Controls and limits
 
-- With recent telemetry, STOP is disabled at 0 km/h and START and START (ECO) are disabled above 0 km/h. A console that reports 1 km/h while stopped will therefore disable both START buttons. Without recent telemetry, speed does not disable either button.
+- With recent telemetry, STOP is disabled at 0 km/h and START and START (ECO) are disabled above 0 km/h. After a satellite BLE connection, the ambiguous 1 km/h reading instead enables START and disables STOP until a START is requested or unambiguous movement is reported. This does not confirm the belt is stopped: check it physically before connecting. STOP remains available during the start sequence. After that sequence, 1 km/h disables START even if the belt is stopped. Without recent telemetry, speed does not disable either button.
 - Speed buttons change the target in tenths; presets range from 2 to 16 km/h. The software limit is 0–16 km/h. Check the limits of your model.
 - Incline is adjusted by ±1 or by selecting an integer from 1 to 15. On connection, the reference sequence initially sends incline **0**; this does not change the selectable 1–15 range.
 - When adjusting speed or incline, the firmware sends the speed target followed by the incline target. The value displayed as the sent target is not an acknowledgement from the console.
@@ -452,7 +452,7 @@ El ESP32 no conecta automáticamente al arrancar ni reconecta si se pierde el en
 
 ### Controles y límites
 
-- Con telemetría reciente, STOP se deshabilita a 0 km/h y START y START (ECO) por encima de 0 km/h. Si la consola indica 1 km/h estando parada, ambos botones START quedarán deshabilitados. Sin telemetría reciente, la velocidad no deshabilita ninguno de los botones.
+- Con telemetría reciente, STOP se deshabilita a 0 km/h y START y START (ECO) por encima de 0 km/h. Tras conectar BLE en modo satélite, la lectura ambigua de 1 km/h habilita START y deshabilita STOP hasta que se solicite START o se detecte movimiento no ambiguo. Esto no confirma que la banda esté parada: compruébalo físicamente antes de conectar. STOP permanece disponible durante la secuencia de arranque. Después de esa secuencia, 1 km/h deshabilita START incluso si la banda está parada. Sin telemetría reciente, la velocidad no deshabilita ninguno de los botones.
 - Los botones de velocidad cambian el objetivo en décimas; los accesos directos van de 2 a 16 km/h. El límite software es 0–16 km/h. Comprueba los límites de tu modelo.
 - La inclinación se ajusta con ±1 o seleccionando un entero de 1 a 15. Al conectar, la secuencia de referencia envía inicialmente inclinación **0**; esto no modifica el rango seleccionable de 1–15.
 - Al ajustar velocidad o inclinación, el firmware transmite el objetivo de velocidad y después el de inclinación. El valor mostrado como «objetivo enviado» no es una confirmación de la consola.
